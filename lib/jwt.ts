@@ -5,20 +5,28 @@ const COOKIE_NAME = process.env.AUTH_COOKIE_NAME || "admin_token";
 
 if (!JWT_SECRET) throw new Error("JWT_SECRET not set");
 
-// Keep options minimal so we don't rely on external typings in CI
-type MinimalSignOptions = { expiresIn?: string | number };
+// Minimal local sign options (instead of importing SignOptions)
+interface MinimalSignOptions {
+  expiresIn?: string | number;
+}
+
+// Helper to narrow jwt type for .sign and .verify
+type JwtSignFn = (payload: string | Buffer | object, secret: string, options?: MinimalSignOptions) => string;
+type JwtVerifyFn = (token: string, secret: string) => unknown;
+
+const jwtSign: JwtSignFn = (jwt as unknown as { sign: JwtSignFn }).sign;
+const jwtVerify: JwtVerifyFn = (jwt as unknown as { verify: JwtVerifyFn }).verify;
 
 export function signToken(
   payload: Record<string, unknown>,
   options: MinimalSignOptions = { expiresIn: "7d" }
-) {
-  // Use `any` at the call site only to avoid importing types from jsonwebtoken.
-  return (jwt as any).sign(payload, JWT_SECRET, options) as string;
+): string {
+  return jwtSign(payload, JWT_SECRET, options);
 }
 
 export function verifyToken<T = Record<string, unknown>>(token: string): T | null {
   try {
-    return ((jwt as any).verify(token, JWT_SECRET) as unknown) as T;
+    return jwtVerify(token, JWT_SECRET) as T;
   } catch {
     return null;
   }
