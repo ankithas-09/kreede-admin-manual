@@ -20,15 +20,6 @@ type UserLean = {
   updatedAt?: Date;
 };
 
-// Narrow filter type (no `any`)
-type UsersFilter = {
-  $or?: Array<
-    | { name: { $regex: string; $options: string } }
-    | { email: { $regex: string; $options: string } }
-  >;
-  locality?: string;
-};
-
 export async function GET(req: Request) {
   try {
     await dbConnect();
@@ -36,9 +27,9 @@ export async function GET(req: Request) {
     const { searchParams } = new URL(req.url);
     const q = (searchParams.get("q") || "").trim();
     const locality = (searchParams.get("locality") || "all").trim();
-    const sort = (searchParams.get("sort") || "desc").trim(); // "desc" (latest first) | "asc"
+    const sort = (searchParams.get("sort") || "desc").trim();
 
-    const filter: UsersFilter = {};
+    const filter: Record<string, unknown> = {};
     if (q) {
       filter.$or = [
         { name: { $regex: q, $options: "i" } },
@@ -53,7 +44,7 @@ export async function GET(req: Request) {
 
     const [users, localities] = await Promise.all([
       UserModel.find(filter).sort({ createdAt: sortDir }).lean<UserLean[]>(),
-      UserModel.distinct<string>("locality"),
+      UserModel.distinct("locality"),
     ]);
 
     return NextResponse.json({ ok: true, users, localities });
@@ -71,6 +62,13 @@ export async function POST(req: Request) {
     if (!parse.success) {
       return NextResponse.json({ error: "Invalid data" }, { status: 400 });
     }
+
+    // ✅ Check if a user with the same email already exists
+    const existing = await UserModel.findOne({ email: parse.data.email }).lean();
+    if (existing) {
+      return NextResponse.json({ error: "User with this email already exists." }, { status: 409 });
+    }
+
     const user = await UserModel.create(parse.data);
     return NextResponse.json({ ok: true, id: user._id });
   } catch (err: unknown) {

@@ -16,11 +16,10 @@ type BookingNew = {
   paid: boolean;
   cancelled?: boolean;
   refunded?: boolean;
-  createdAt?: string | Date;
+  createdAt?: string;
   origin?: "booking" | "cancellation";
 };
 
-// Legacy (older) shape: one document had arrays per court
 type BookingLegacy = {
   _id: string;
   name: string;
@@ -33,34 +32,22 @@ type BookingLegacy = {
   paid?: boolean;
   cancelled?: boolean;
   refunded?: boolean;
-  createdAt?: string | Date;
+  createdAt?: string;
   origin?: "booking" | "cancellation";
 };
 
 type Booking = BookingNew | BookingLegacy;
 
-type BookingsGET =
-  | { ok: true; bookings: Booking[] }
-  | { error: string };
-
-type UpdatedMember = { _id: string; name: string; email?: string; credits: number };
-type BookingPATCHCancel =
-  | { ok: true; booking: unknown; updatedMember?: UpdatedMember | null }
-  | { error: string };
-type BookingPATCHSimple =
-  | { ok: true; booking: unknown }
-  | { error: string };
-
 export default function BookingsPage() {
   const [items, setItems] = useState<Booking[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
-  const [workingId, setWorkingId] = useState<string | null>(null); // for pay/cancel/refund
+  const [workingId, setWorkingId] = useState<string | null>(null);
 
   // BroadcastChannel (to notify Members page of credit updates)
   const bcRef = useRef<BroadcastChannel | null>(null);
   useEffect(() => {
-    if (typeof window !== "undefined") {
+    if (typeof window !== "undefined" && "BroadcastChannel" in window) {
       bcRef.current = new BroadcastChannel("admin-events");
     }
     return () => {
@@ -91,10 +78,10 @@ export default function BookingsPage() {
       if (isMember) params.set("isMember", isMember);
       if (sort) params.set("sort", sort);
       const res = await fetch(`/api/bookings?${params.toString()}`, { cache: "no-store" });
-      const data: BookingsGET = await res.json();
-      if (!res.ok || "error" in data) throw new Error(("error" in data && data.error) || "Failed to fetch");
+      const data = (await res.json()) as { ok?: boolean; bookings?: Booking[]; error?: string };
+      if (!res.ok) throw new Error(data?.error || "Failed to fetch");
       setItems(data.bookings || []);
-    } catch (e: unknown) {
+    } catch (e) {
       const msg = e instanceof Error ? e.message : "Error loading bookings";
       setErr(msg);
     } finally {
@@ -112,6 +99,7 @@ export default function BookingsPage() {
     [debouncedQ, date, isMember, sort]
   );
 
+  // --- Type guards & render helpers ---
   function isNewShape(b: Booking): b is BookingNew {
     return (b as BookingNew).slot !== undefined && (b as BookingNew).court !== undefined;
   }
@@ -125,43 +113,94 @@ export default function BookingsPage() {
     return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
   }
   function displayCourt(b: Booking) {
-    if (isNewShape(b)) return prettyCourt((b as BookingNew).court);
+    if (isNewShape(b)) return prettyCourt(b.court);
     const parts: string[] = [];
-    if ((b as BookingLegacy).court1?.length) parts.push("Court 1");
-    if ((b as BookingLegacy).court2?.length) parts.push("Court 2");
-    if ((b as BookingLegacy).court3?.length) parts.push("Court 3");
+    if ((b.court1 || []).length) parts.push("Court 1");
+    if ((b.court2 || []).length) parts.push("Court 2");
+    if ((b.court3 || []).length) parts.push("Court 3");
     return parts.length ? parts.join(", ") : "—";
   }
   function displaySlots(b: Booking) {
-    if (isNewShape(b)) return formatSlot((b as BookingNew).slot);
-    const bb = b as BookingLegacy;
-    const s1 = (bb.court1 || []).map(formatSlot);
-    const s2 = (bb.court2 || []).map(formatSlot);
-    const s3 = (bb.court3 || []).map(formatSlot);
+    if (isNewShape(b)) return formatSlot(b.slot);
+    const s1 = (b.court1 || []).map(formatSlot);
+    const s2 = (b.court2 || []).map(formatSlot);
+    const s3 = (b.court3 || []).map(formatSlot);
     const all = [...s1, ...s2, ...s3];
     return all.length ? all.join(", ") : "—";
   }
   function amountDueOf(b: Booking) {
-    if ("amountDue" in b && typeof b.amountDue === "number") return b.amountDue;
-    const bb = b as BookingLegacy;
-    const slots = isNewShape(b)
-      ? 1
-      : (bb.court1?.length || 0) + (bb.court2?.length || 0) + (bb.court3?.length || 0);
+    if (typeof (b as BookingNew).amountDue === "number") return (b as BookingNew).amountDue;
+    const slots =
+      isNewShape(b) ? 1 : (b.court1?.length || 0) + (b.court2?.length || 0) + (b.court3?.length || 0);
     return b.isMember ? 0 : 500 * slots;
   }
   function isPaid(b: Booking) {
     const due = amountDueOf(b);
-    const paid = "paid" in b ? Boolean(b.paid) : false;
-    return paid || due === 0;
+    const paidVal = isNewShape(b) ? b.paid : Boolean(b.paid);
+    return !!paidVal || due === 0;
   }
   function isCancelled(b: Booking) {
-    return "cancelled" in b ? Boolean(b.cancelled) : false;
+    return Boolean(b.cancelled) || b.origin === "cancellation";
   }
   function isRefunded(b: Booking) {
-    return "refunded" in b ? Boolean(b.refunded) : false;
+    return Boolean(b.refunded);
   }
-  function getOrigin(b: Booking): "booking" | "cancellation" | undefined {
-    return "origin" in b ? b.origin : undefined;
+
+  // --- CSV Export ---
+  function csvEscape(value: unknown) {
+    const s = String(value ?? "");
+    return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  }
+
+  function exportCSV() {
+    const headers = [
+      "Name",
+      "Member",
+      "Date",
+      "Court",
+      "Slot",
+      "Amount",
+      "Payment",
+      "Status",
+      "Created",
+    ];
+
+    const rows = items.map((b) => {
+      const due = amountDueOf(b);
+      const paid = isPaid(b);
+      const cancelled = isCancelled(b);
+      const refunded = isRefunded(b);
+
+      const status = cancelled ? "Cancelled" : refunded ? "Refunded" : "Active";
+      const payment = refunded ? "Refunded" : paid ? "Paid" : "Unpaid";
+
+      return [
+        b.name ?? "",
+        b.isMember ? "Yes" : "No",
+        b.date ?? "",
+        displayCourt(b),
+        displaySlots(b),
+        `₹${due}`,
+        payment,
+        status,
+        b.createdAt ? new Date(b.createdAt).toLocaleString("en-IN") : "",
+      ];
+    });
+
+    const csv = [headers, ...rows]
+      .map((cols) => cols.map(csvEscape).join(","))
+      .join("\r\n");
+
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const stamp = new Date().toISOString().replace(/[:T]/g, "-").slice(0, 19);
+    a.href = url;
+    a.download = `bookings-${stamp}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
   }
 
   // --- Actions ---
@@ -173,13 +212,19 @@ export default function BookingsPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ pay: true }),
       });
-      const data: BookingPATCHSimple = await res.json().catch(() => ({ error: "Failed" }));
-      if (!res.ok || "error" in data) {
-        alert(("error" in data && data.error) || "Failed to mark as paid");
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      if (!res.ok) {
+        alert(data?.error || "Failed to mark as paid");
         return;
       }
       setItems((prev) =>
-        prev.map((b) => (b._id === id ? ({ ...b, paid: true, amountDue: 0 } as Booking) : b))
+        prev.map((b) =>
+          b._id === id
+            ? (isNewShape(b)
+                ? { ...b, paid: true, amountDue: 0 }
+                : { ...b, paid: true, amountDue: 0 }) // legacy might not have amountDue, harmless to set
+            : b
+        )
       );
     } finally {
       setWorkingId(null);
@@ -195,19 +240,23 @@ export default function BookingsPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ cancel: true }),
       });
-      const data: BookingPATCHCancel = await res.json().catch(() => ({ error: "Failed" }));
-      if (!res.ok || "error" in data) {
-        alert(("error" in data && data.error) || "Failed to cancel booking");
+      const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        error?: string;
+        updatedMember?: { _id: string; name: string; credits: number; email?: string };
+      };
+      if (!res.ok) {
+        alert(data?.error || "Failed to cancel booking");
         return;
       }
 
-      // Optimistic UI: mark as cancelled and set origin to 'cancellation' (since it's moved)
+      // Optimistic UI: mark as cancelled / moved
       setItems((prev) =>
-        prev.map((b) => (b._id === id ? ({ ...b, cancelled: true, origin: "cancellation" } as Booking) : b))
+        prev.map((b) => (b._id === id ? { ...b, cancelled: true, origin: "cancellation" } : b))
       );
 
-      // Notify Members page to update credits immediately when API returns updated member
-      if ("updatedMember" in data && data.updatedMember && bcRef.current) {
+      // Notify Members page to update credits immediately
+      if (data?.updatedMember && bcRef.current) {
         bcRef.current.postMessage({ type: "member-updated", payload: data.updatedMember });
       }
     } finally {
@@ -224,12 +273,12 @@ export default function BookingsPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ refund: true }),
       });
-      const data: BookingPATCHSimple = await res.json().catch(() => ({ error: "Failed" }));
-      if (!res.ok || "error" in data) {
-        alert(("error" in data && data.error) || "Failed to refund booking");
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      if (!res.ok) {
+        alert(data?.error || "Failed to refund booking");
         return;
       }
-      setItems((prev) => prev.map((b) => (b._id === id ? ({ ...b, refunded: true } as Booking) : b)));
+      setItems((prev) => prev.map((b) => (b._id === id ? { ...b, refunded: true } : b)));
     } finally {
       setWorkingId(null);
     }
@@ -247,9 +296,14 @@ export default function BookingsPage() {
             <div className="topbar-sub">Manage bookings and payments</div>
           </div>
         </div>
-        <Link className="btn btn-primary" href="/admin/bookings/new">
-          Add Booking
-        </Link>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button className="btn" onClick={exportCSV} aria-label="Export to CSV">
+            Export
+          </button>
+          <Link className="btn btn-primary" href="/admin/bookings/new">
+            Add Booking
+          </Link>
+        </div>
       </div>
 
       {/* Toolbar */}
@@ -348,7 +402,7 @@ export default function BookingsPage() {
                   const cancelled = isCancelled(b);
                   const refunded = isRefunded(b);
                   const member = b.isMember;
-                  const origin = getOrigin(b);
+                  const origin = b.origin;
 
                   return (
                     <tr
@@ -369,7 +423,9 @@ export default function BookingsPage() {
                         ) : paid || due === 0 ? (
                           <span className="pill pill-accent">Already paid</span>
                         ) : cancelled || origin === "cancellation" ? (
-                          <span className="pill" style={{ background: "#f1efea" }}>—</span>
+                          <span className="pill" style={{ background: "#f1efea" }}>
+                            —
+                          </span>
                         ) : (
                           <button
                             className="btn btn-primary"
@@ -381,11 +437,8 @@ export default function BookingsPage() {
                         )}
                       </td>
                       <td style={td}>
-                        {cancelled || origin === "cancellation" ? (
-                          <span
-                            className="pill"
-                            style={{ background: "#ffe0cc", color: "#7a3e00" }}
-                          >
+                        {cancelled ? (
+                          <span className="pill" style={{ background: "#ffe0cc", color: "#7a3e00" }}>
                             Cancelled
                           </span>
                         ) : refunded ? (
@@ -393,17 +446,13 @@ export default function BookingsPage() {
                             Refunded
                           </span>
                         ) : (
-                          <span
-                            className="pill"
-                            style={{ background: "#f0f7ff", color: "#0b63b6" }}
-                          >
+                          <span className="pill" style={{ background: "#f0f7ff", color: "#0b63b6" }}>
                             Active
                           </span>
                         )}
                       </td>
                       <td style={td}>
                         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                          {/* Cancel: available if not yet cancelled and not already moved */}
                           <button
                             className="btn"
                             onClick={() => onCancel(id)}
@@ -417,7 +466,6 @@ export default function BookingsPage() {
                               : "Cancel"}
                           </button>
 
-                          {/* Refund: show only for paid non-member, not refunded, not cancelled, still active */}
                           {!member && paid && !refunded && !cancelled && origin !== "cancellation" && (
                             <button className="btn" onClick={() => onRefund(id)} disabled={workingId === id}>
                               {workingId === id ? "Working…" : "Refund"}
