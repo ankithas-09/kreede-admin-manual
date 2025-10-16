@@ -1,17 +1,24 @@
-import jwt, { type SignOptions, type Secret } from "jsonwebtoken";
+import jwt from "jsonwebtoken";
 
-const JWT_SECRET: Secret = process.env.JWT_SECRET as string;
+const JWT_SECRET = process.env.JWT_SECRET ?? "";
 const COOKIE_NAME = process.env.AUTH_COOKIE_NAME || "admin_token";
 
 if (!JWT_SECRET) throw new Error("JWT_SECRET not set");
 
-export function signToken(payload: object, options: SignOptions = { expiresIn: "7d" }) {
-  return jwt.sign(payload, JWT_SECRET, options);
+// Keep options minimal so we don't rely on external typings in CI
+type MinimalSignOptions = { expiresIn?: string | number };
+
+export function signToken(
+  payload: Record<string, unknown>,
+  options: MinimalSignOptions = { expiresIn: "7d" }
+) {
+  // Use `any` at the call site only to avoid importing types from jsonwebtoken.
+  return (jwt as any).sign(payload, JWT_SECRET, options) as string;
 }
 
 export function verifyToken<T = Record<string, unknown>>(token: string): T | null {
   try {
-    return jwt.verify(token, JWT_SECRET) as T;
+    return ((jwt as any).verify(token, JWT_SECRET) as unknown) as T;
   } catch {
     return null;
   }
